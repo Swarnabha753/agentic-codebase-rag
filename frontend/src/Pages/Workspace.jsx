@@ -6,7 +6,7 @@ import axios from "axios";
 import { Search, GitBranch, Loader2, ChevronDown, CheckCircle2, Sparkles, FileCode2, Network } from "lucide-react";
 import "../App.css";
 
-const API_BASE = "http://localhost:8000";
+const API_BASE = import.meta.env.VITE_API_BASE || "http://localhost:8000";
 
 function ScoreRing({ label, value }) {
   const pct = value == null ? 0 : Math.round(value * 100);
