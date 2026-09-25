@@ -14,6 +14,8 @@ being able to explain exactly what happens at each step is what makes
 this defensible in an interview.
 """
 import os
+import time
+from app.eval.citation_check import check_citations
 
 from app.eval.faithfulness import score_faithfulness
 
@@ -28,7 +30,10 @@ client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
 
 def run_agent(collection, graph, question: str, top_k: int = 5, max_hops: int = 1, max_iterations: int = 2, retry_count: int = 0):
-    trace = []  # records what happened at each step, shown to the user for transparency
+    _start_time = time.time()
+    _llm_calls = 0
+    _tokens_used = 0
+    trace = []
 
     # Step 1: initial vector retrieval
     hits = query_chunks(collection, question, top_k=top_k)
@@ -93,10 +98,17 @@ Answer:"""
         temperature=0.1,
     )
     answer = response.choices[0].message.content
+    _llm_calls += 1
+    _tokens_used += response.usage.total_tokens
 
+    
     # Step 4: evaluate faithfulness; retry once with wider retrieval if it scores low
     eval_result = score_faithfulness(question, answer, context_text)
+    _llm_calls += 1
     trace.append({"step": "eval", **eval_result})
+
+    citation_result = check_citations(answer, list(gathered.keys()))
+    trace.append({"step": "citation_check", **citation_result})
 
     faithfulness = eval_result.get("faithfulness")
     if faithfulness is not None and faithfulness < 0.4 and retry_count < 1:
@@ -111,4 +123,50 @@ Answer:"""
         "trace": trace,
         "chunks_used": list(gathered.keys()),
         "eval": eval_result,
+        "citation_check": citation_result,
+        "stats": {
+            "llm_calls": _llm_calls,
+            "tokens_used": _tokens_used,
+            "latency_seconds": round(time.time() - _start_time, 2),
+        },
+    }
+
+def run_baseline(collection, question: str, top_k: int = 5):
+    """Plain top-k vector RAG, no call-graph expansion — the naive-RAG baseline."""
+    start = time.time()
+
+    hits = query_chunks(collection, question, top_k=top_k)
+    context_blocks = []
+    for h in hits:
+        meta = h["metadata"]
+        context_blocks.append(
+            f"[{h['id']}] ({meta['file_path']} lines {meta['start_line']}-{meta['end_line']})\n{h['document']}"
+        )
+    context_text = "\n\n---\n\n".join(context_blocks)
+
+    prompt = f"""Answer the question using only the retrieved code chunks below.
+Cite the exact chunk id for every claim you make.
+
+Question: {question}
+
+Retrieved code chunks:
+{context_text}
+
+Answer:"""
+
+    response = client.chat.completions.create(
+        model="gpt-4o-mini",
+        messages=[{"role": "user", "content": prompt}],
+        temperature=0.1,
+    )
+    elapsed = time.time() - start
+
+    return {
+        "answer": response.choices[0].message.content,
+        "chunks_used": [h["id"] for h in hits],
+        "stats": {
+            "llm_calls": 1,
+            "tokens_used": response.usage.total_tokens,
+            "latency_seconds": round(elapsed, 2),
+        },
     }

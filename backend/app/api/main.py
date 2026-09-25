@@ -18,7 +18,7 @@ from app.ingestion.chunker import chunk_repo
 from app.ingestion.clone import _force_remove_readonly, clone_repo, discover_source_files, cleanup_repo
 from app.indexing.graph import build_call_graph
 from app.indexing.vectorstore import get_chroma_client, get_or_create_collection, index_chunks
-from app.agent.rag_agent import run_agent
+from app.agent.rag_agent import run_agent, run_baseline
 
 app = FastAPI(title="Agentic Codebase RAG")
 
@@ -77,6 +77,19 @@ def index_repo(req: IndexRequest):
         _INDEXED_REPOS[key] = {"collection": collection, "graph": graph, "repo_url": req.repo_url}
         cleanup_repo(path)
 
+        lang_counts = {}
+        for f in files:
+            lang_counts[f.language] = lang_counts.get(f.language, 0) + 1
+
+        return {
+            "status": "indexed",
+            "repo_url": req.repo_url,
+            "file_count": len(files),
+            "chunk_count": len(chunks),
+            "graph_edges": graph.number_of_edges(),
+            "languages": lang_counts,
+        }
+
         return {"status": "indexed", "repo_url": req.repo_url, "chunk_count": len(chunks)}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -91,6 +104,18 @@ def query_repo(req: QueryRequest):
     entry = _INDEXED_REPOS[key]
     result = run_agent(entry["collection"], entry["graph"], req.question)
     return result
+
+@app.post("/query_compare")
+def query_compare(req: QueryRequest):
+    key = _repo_key(req.repo_url)
+    if key not in _INDEXED_REPOS:
+        raise HTTPException(status_code=400, detail="Repo not indexed yet — call /index first")
+
+    entry = _INDEXED_REPOS[key]
+    agentic_result = run_agent(entry["collection"], entry["graph"], req.question)
+    baseline_result = run_baseline(entry["collection"], req.question)
+
+    return {"agentic": agentic_result, "baseline": baseline_result}
 
 
 @app.get("/health")

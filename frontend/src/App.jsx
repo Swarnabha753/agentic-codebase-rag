@@ -1,3 +1,6 @@
+import ReactMarkdown from "react-markdown";
+import { Prism as SyntaxHighlighter } from "react-syntax-highlighter";
+import { oneDark } from "react-syntax-highlighter/dist/esm/styles/prism";
 import { useState, useRef, useEffect } from "react";
 import axios from "axios";
 import { Search, GitBranch, Loader2, ChevronDown, CheckCircle2, Sparkles, FileCode2, Network } from "lucide-react";
@@ -64,6 +67,27 @@ function TraceTimeline({ trace }) {
   );
 }
 
+function MarkdownAnswer({ text }) {
+  return (
+    <ReactMarkdown
+      components={{
+        code({ inline, className, children, ...props }) {
+          const match = /language-(\w+)/.exec(className || "");
+          return !inline ? (
+            <SyntaxHighlighter style={oneDark} language={match?.[1] || "python"} customStyle={{ borderRadius: 8, fontSize: 12.5, margin: "10px 0" }} {...props}>
+              {String(children).replace(/\n$/, "")}
+            </SyntaxHighlighter>
+          ) : (
+            <code className="inline-code" {...props}>{children}</code>
+          );
+        },
+      }}
+    >
+      {text}
+    </ReactMarkdown>
+  );
+}
+
 function AnswerCard({ item }) {
   const [showTrace, setShowTrace] = useState(false);
   return (
@@ -73,7 +97,7 @@ function AnswerCard({ item }) {
         <span>{item.question}</span>
       </div>
 
-      <p className="answer-text">{item.answer}</p>
+      <div className="answer-text"><MarkdownAnswer text={item.answer} /></div>
 
       <div className="answer-footer">
         {item.eval && (
@@ -100,15 +124,87 @@ function AnswerCard({ item }) {
   );
 }
 
+function CompareCard({ item }) {
+  const { agentic, baseline } = item.compare;
+  return (
+    <div className="answer-card">
+      <div className="answer-question">
+        <FileCode2 size={15} />
+        <span>{item.question}</span>
+      </div>
+
+      <div className="compare-grid">
+        <div className="compare-col">
+          <div className="compare-label baseline-label">Baseline RAG</div>
+          <p className="answer-text small">{baseline.answer}</p>
+          <div className="compare-stats">
+            <span>{baseline.chunks_used.length} chunks</span>
+            <span>{baseline.stats.llm_calls} LLM call</span>
+            <span>{baseline.stats.tokens_used} tokens</span>
+            <span>{baseline.stats.latency_seconds}s</span>
+          </div>
+        </div>
+        <div className="compare-col">
+          <div className="compare-label agentic-label">Agentic (graph-aware)</div>
+          <p className="answer-text small">{agentic.answer}</p>
+          <div className="compare-stats">
+            <span>{agentic.chunks_used.length} chunks</span>
+            <span>{agentic.stats.llm_calls} LLM calls</span>
+            <span>{agentic.stats.tokens_used} tokens</span>
+            <span>{agentic.stats.latency_seconds}s</span>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function EmptyState({ onPick }) {
+  const examples = [
+    { name: "Flask", url: "https://github.com/pallets/flask.git" },
+    { name: "Requests", url: "https://github.com/psf/requests.git" },
+    { name: "Httpie", url: "https://github.com/httpie/cli.git" },
+  ];
+  return (
+    <div className="empty-state">
+      <div className="feature-grid">
+        <div className="feature-card">
+          <Network size={20} className="feature-icon" />
+          <h4>AST-aware chunking</h4>
+          <p>Parses real function/class boundaries with tree-sitter — not naive text splitting.</p>
+        </div>
+        <div className="feature-card">
+          <GitBranch size={20} className="feature-icon" />
+          <h4>Graph-aware retrieval</h4>
+          <p>Follows function calls across files, not just top-k similarity.</p>
+        </div>
+        <div className="feature-card">
+          <Sparkles size={20} className="feature-icon" />
+          <h4>Self-checking answers</h4>
+          <p>Every answer is scored for faithfulness and citation accuracy.</p>
+        </div>
+      </div>
+      <p className="try-label">Try it on a real repo:</p>
+      <div className="example-chips">
+        {examples.map((ex) => (
+          <button className="chip" key={ex.name} onClick={() => onPick(ex.url)}>{ex.name}</button>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 function App() {
   const [repoUrl, setRepoUrl] = useState("https://github.com/pallets/flask.git");
   const [question, setQuestion] = useState("");
   const [indexed, setIndexed] = useState(false);
   const [indexing, setIndexing] = useState(false);
-  const [chunkCount, setChunkCount] = useState(null);
+  const [indexStats, setIndexStats] = useState(null);
   const [querying, setQuerying] = useState(false);
   const [history, setHistory] = useState([]);
+  const [compareMode, setCompareMode] = useState(false);
   const [error, setError] = useState("");
+  const [indexStage, setIndexStage] = useState("");
   const bottomRef = useRef(null);
 
   useEffect(() => {
@@ -117,16 +213,25 @@ function App() {
 
   const handleIndex = async () => {
     setIndexing(true);
+    const stages = ["Cloning repository...", "Parsing AST (functions, classes, methods)...", "Building call graph...", "Embedding chunks..."];
+    let stageIdx = 0;
+    setIndexStage(stages[0]);
+    const stageTimer = setInterval(() => {
+      stageIdx = Math.min(stageIdx + 1, stages.length - 1);
+      setIndexStage(stages[stageIdx]);
+    }, 4000);
     setError("");
     setHistory([]);
     try {
       const res = await axios.post(`${API_BASE}/index`, { repo_url: repoUrl });
       setIndexed(true);
-      setChunkCount(res.data.chunk_count);
+      setIndexStats(res.data);
     } catch (err) {
       setError(err.response?.data?.detail || "Failed to index repo");
     } finally {
+      clearInterval(stageTimer);
       setIndexing(false);
+      setIndexStage("");
     }
   };
 
@@ -137,8 +242,13 @@ function App() {
     setQuerying(true);
     setError("");
     try {
-      const res = await axios.post(`${API_BASE}/query`, { repo_url: repoUrl, question: q });
-      setHistory((h) => [...h, { question: q, ...res.data }]);
+      if (compareMode) {
+        const res = await axios.post(`${API_BASE}/query_compare`, { repo_url: repoUrl, question: q });
+        setHistory((h) => [...h, { question: q, compare: res.data }]);
+      } else {
+        const res = await axios.post(`${API_BASE}/query`, { repo_url: repoUrl, question: q });
+        setHistory((h) => [...h, { question: q, ...res.data }]);
+      }
     } catch (err) {
       setError(err.response?.data?.detail || "Failed to get answer");
     } finally {
@@ -170,19 +280,50 @@ function App() {
             {indexing ? <><Loader2 size={15} className="spin" /> Indexing...</> : indexed ? "Re-index" : "Index Repo"}
           </button>
         </div>
-        {indexed && (
-          <div className="status-ok"><CheckCircle2 size={14} /> Indexed {chunkCount} functions/classes — ready for questions</div>
+        {indexing && <div className="index-stage"><Loader2 size={13} className="spin" /> {indexStage}</div>}
+        {indexed && indexStats && (
+          <div className="index-stats">
+            <div className="status-ok"><CheckCircle2 size={14} /> Ready for questions</div>
+            <div className="stat-row">
+              <div className="stat-box"><span className="stat-num">{indexStats.file_count}</span><span className="stat-label">files</span></div>
+              <div className="stat-box"><span className="stat-num">{indexStats.chunk_count}</span><span className="stat-label">functions/classes</span></div>
+              <div className="stat-box"><span className="stat-num">{indexStats.graph_edges}</span><span className="stat-label">call-graph edges</span></div>
+              <div className="stat-box">
+                <span className="stat-num">{Object.keys(indexStats.languages || {}).length}</span>
+                <span className="stat-label">{Object.keys(indexStats.languages || {}).join(", ")}</span>
+              </div>
+            </div>
+          </div>
+        )}
+        {indexed && indexStats && (
+          <div className="index-stats">
+            <div className="status-ok"><CheckCircle2 size={14} /> Ready for questions</div>
+            <div className="stat-row">
+              <div className="stat-box"><span className="stat-num">{indexStats.file_count}</span><span className="stat-label">files</span></div>
+              <div className="stat-box"><span className="stat-num">{indexStats.chunk_count}</span><span className="stat-label">functions/classes</span></div>
+              <div className="stat-box"><span className="stat-num">{indexStats.graph_edges}</span><span className="stat-label">call-graph edges</span></div>
+              <div className="stat-box">
+                <span className="stat-num">{Object.keys(indexStats.languages || {}).length}</span>
+                <span className="stat-label">{Object.keys(indexStats.languages || {}).join(", ")}</span>
+              </div>
+            </div>
+          </div>
         )}
       </div>
 
       {error && <div className="error">{error}</div>}
+      {!indexed && history.length === 0 && <EmptyState onPick={(url) => setRepoUrl(url)} />}
 
       <div className="chat-history">
-        {history.map((item, i) => <AnswerCard item={item} key={i} />)}
+        {history.map((item, i) => item.compare ? <CompareCard item={item} key={i} /> : <AnswerCard item={item} key={i} />)}
         <div ref={bottomRef} />
       </div>
 
       <div className="panel ask-panel">
+        <label className="compare-toggle">
+          <input type="checkbox" checked={compareMode} onChange={(e) => setCompareMode(e.target.checked)} />
+          Compare agentic vs. baseline RAG
+        </label>
         <div className="row">
           <input
             value={question}
