@@ -1,5 +1,12 @@
 # Agentic Codebase RAG
 
+**Live demo:** https://agentic-codebase-rag-sh9a-alpha.vercel.app/
+**API:** https://agentic-codebase-rag.onrender.com
+
+> Note: the backend runs on Render's free tier, which sleeps after
+> inactivity. The first request after idle can take 30-60s to wake up —
+> that's expected, not a bug.
+
 Ask any GitHub repository a question in plain English and get an answer that
 traces through **actual function calls across files** — not just top-k
 vector similarity over disconnected text chunks.
@@ -10,10 +17,10 @@ vector similarity over disconnected text chunks.
 > graph, retrieves *that* function too, and only then writes an answer —
 > citing exact files and line numbers for every claim.
 
-Built to demonstrate production-grade RAG system design: AST-aware chunking,
-graph-based iterative retrieval, LLM-as-judge evaluation with a deterministic
-citation-accuracy backstop, and a baseline-vs-agentic comparison mode that
-proves the graph-based approach actually outperforms naive RAG.
+A full multi-page product — a landing page, a "how it works" walkthrough,
+and a live workspace where you index any public repo and compare
+**agentic, graph-aware retrieval** against **plain baseline RAG** side by
+side, with token/latency stats for both.
 
 ---
 
@@ -37,6 +44,21 @@ into a prompt. That works for static documents. It breaks for code, because:
   retrieved context — catching hallucinated citations the LLM judge alone
   can miss. Low-scoring answers trigger one automatic retry with wider
   retrieval.
+- **Provably better than baseline, not just claimed.** A dedicated compare
+  mode runs the same question through both the agentic pipeline and a
+  plain top-k baseline side by side — chunks used, LLM calls, tokens, and
+  latency shown for each — so the value of graph expansion is
+  demonstrable, not asserted.
+
+---
+
+## Product structure
+
+| Page | Route | Purpose |
+|---|---|---|
+| Landing | `/` | Hero, feature highlights, CTA |
+| How it works | `/how-it-works` | Full pipeline walkthrough, step by step |
+| Workspace | `/app` | Index a repo, ask questions, toggle compare mode, view reasoning traces |
 
 ---
 
@@ -93,6 +115,9 @@ into a prompt. That works for static documents. It breaks for code, because:
                                 ▼
                      Cited answer + reasoning
                      trace + eval scores
+                     (also: /query_compare runs
+                     the same question through a
+                     plain baseline RAG in parallel)
 ```
 
 ### Component breakdown
@@ -109,9 +134,10 @@ into a prompt. That works for static documents. It breaks for code, because:
 | Answer generation | OpenAI `gpt-4o-mini` | Synthesizes a cited answer from all gathered context |
 | Eval — faithfulness | `gpt-4o-mini` as judge | Scores whether the answer's claims trace back to retrieved context |
 | Eval — citation accuracy | Regex + set lookup (no LLM call) | Deterministically checks every `[chunk_id]` citation in the answer actually exists in retrieved context — catches hallucinated citations the LLM judge can miss |
+| Baseline mode | Same LLM, no graph | Plain top-k RAG for direct side-by-side comparison |
 | Retry logic | Explicit `retry_count` param | Exactly one retry with wider top-k if faithfulness < 0.4 — capped via an explicit counter (not inferred from mutable trace state, which caused an infinite-retry bug during development — see "Bugs found" below) |
 | API | `FastAPI` | `/index`, `/query`, `/query_compare` (agentic vs. baseline side-by-side), `/health` |
-| Frontend | `React` + `Vite` | Chat-style history, circular faithfulness/relevance score rings, citation pills, visual reasoning-trace timeline |
+| Frontend | `React Router` + `Vite` | Landing, how-it-works, and workspace pages; chat-style history, circular faithfulness/relevance score rings, citation pills, visual reasoning-trace timeline, baseline-vs-agentic comparison view |
 
 ---
 
@@ -124,7 +150,9 @@ The `/query_compare` endpoint runs the same question through both:
 This exists specifically to make the project's value *demonstrable*, not just
 claimed. In testing against real multi-hop questions (e.g. "why does X fail
 when Y happens"), the agentic path retrieves the actual dependency chain the
-baseline misses, producing a materially more complete answer.
+baseline misses, producing a materially more complete answer — at the cost
+of more LLM calls, tokens, and latency, which the UI shows transparently for
+both sides.
 
 ---
 
@@ -153,6 +181,15 @@ more valuable in an interview than claiming nothing went wrong:
    which Windows' default deletion refuses to remove (not an issue on
    Linux/Mac). Fixed with a custom `onexc` handler that clears the
    read-only bit and retries.
+5. **LLM-as-judge noise.** Faithfulness scoring sometimes rated clearly
+   correct, well-cited answers as `0.0`. Addressed by adding the
+   deterministic citation-accuracy check as a second, non-LLM signal rather
+   than trusting the judge alone.
+6. **`openai`/`httpx` version mismatch on deployment.** A fresh install on
+   Render resolved an `openai` version incompatible with the installed
+   `httpx` (a breaking API change in `httpx`'s `Client.__init__`). Fixed by
+   pinning both `openai==1.54.4` and `httpx==0.27.2` explicitly instead of
+   leaving them unpinned.
 
 ---
 
@@ -162,16 +199,16 @@ more valuable in an interview than claiming nothing went wrong:
   the common case well (same-file calls, unambiguous cross-file names) but
   can't resolve calls behind runtime polymorphism. A production version
   would integrate per-language static analysis (e.g. `jedi` for Python).
-- **LLM-as-judge faithfulness scoring is noisy** — it sometimes scored
-  clearly-correct, well-cited answers as `0.0` during testing. The
-  deterministic citation-accuracy check exists specifically to compensate
-  for this rather than trusting a single eval signal.
 - **In-memory index storage** — indexed repos are lost on server restart.
   A production version would persist the repo→collection mapping (e.g.
   SQLite) alongside Chroma's existing on-disk persistence.
 - **No repo-size cap yet** — a very large monorepo would take a long time
   to embed synchronously. A production version would embed asynchronously
   with a job queue and progress polling.
+- **Free-tier hosting trade-offs** — Render's free tier sleeps after
+  inactivity and has tight memory for the local embedding model. A
+  production deployment would use a paid tier or swap to an API-based
+  embedding call to cut memory footprint.
 
 ---
 
@@ -188,12 +225,12 @@ Create `backend/.env`:
 OPENAI_API_KEY=your-key-here
 ```
 
-Run the API:
+Run:
 ```bash
 python -m uvicorn app.api.main:app --port 8000
 ```
-(without `--reload` — the reloader restarts the process when `/index` writes
-temp files, which wipes the in-memory index)
+(without `--reload` — the reloader restarts the process when `/index`
+writes temp files, which wipes the in-memory index)
 
 ### Frontend
 ```bash
@@ -205,10 +242,23 @@ npm run dev
 Open `http://localhost:5173`, index a public repo (e.g.
 `https://github.com/pallets/flask.git`), then ask a question.
 
-**Important (Windows):** `tree-sitter-languages` is unmaintained and lacks
-Python 3.12+ wheels — this project uses the actively maintained per-language
-packages (`tree-sitter-python`, `tree-sitter-javascript`,
-`tree-sitter-typescript`) instead. Already reflected in `requirements.txt`.
+**Windows note:** this project uses `tree-sitter-python`,
+`tree-sitter-javascript`, `tree-sitter-typescript` directly instead of the
+unmaintained `tree-sitter-languages` package, which lacks Python 3.12+
+wheels.
+
+---
+
+## Deployment
+
+- **Backend** deployed on Render (free tier) — root directory `backend`,
+  build command `pip install -r requirements.txt`, start command
+  `uvicorn app.api.main:app --host 0.0.0.0 --port $PORT`.
+- **Frontend** deployed on Vercel — root directory `frontend`, Vite preset
+  auto-detected, `VITE_API_BASE` environment variable pointed at the Render
+  backend URL.
+- CORS on the backend is locked to the deployed frontend origin rather than
+  left wide open, once the real Vercel URL was known.
 
 ---
 
@@ -225,11 +275,11 @@ codebase-rag/
 │   └── requirements.txt
 └── frontend/
     └── src/
-        ├── App.jsx
+        ├── pages/          # Landing.jsx, HowItWorks.jsx, Workspace.jsx
+        ├── components/     # Navbar.jsx
+        ├── App.jsx         # router shell
         └── App.css
 ```
 
 ## License
 MIT
-
-
