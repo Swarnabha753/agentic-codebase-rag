@@ -1,8 +1,8 @@
 import { BrowserRouter, Routes, Route } from "react-router-dom";
-import Navbar from "./components/Navbar";
-import Landing from "./pages/Landing";
-import HowItWorks from "./pages/HowItWorks";
-import Workspace from "./pages/Workspace";
+import Navbar from "./Components/Navbar";
+import Landing from "./Pages/Landing";
+import HowItWorks from "./Pages/HowItWorks";
+import Workspace from "./Pages/Workspace";
 import "./App.css";
 
 function App() {
