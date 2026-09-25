@@ -24,7 +24,7 @@ app = FastAPI(title="Agentic Codebase RAG")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # fine for a portfolio project; tighten for real deployment
+    allow_origins=["https://agentic-codebase-rag-sh9a-alpha.vercel.app", "http://localhost:5173"],  # fine for a portfolio project; tighten for real deployment
     allow_methods=["*"],
     allow_headers=["*"],
 )
