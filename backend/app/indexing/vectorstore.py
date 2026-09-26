@@ -1,15 +1,17 @@
 """
-Embeds each CodeChunk and stores it in a local Chroma collection.
-
-Uses OpenAI's embedding API (text-embedding-3-small) rather than a local
-sentence-transformers model. This trade-off exists specifically for the
-deployed environment: the local model (~90MB + torch, several hundred MB
-of RAM at runtime) doesn't fit in Render's free-tier 512MB memory limit,
-so the API-based approach is used instead — a few cents of API cost per
-index in exchange for a much smaller memory footprint.
+Pure-Python vector store — no compiled/native dependencies (no ChromaDB,
+no hnswlib). This exists specifically because ChromaDB's native HNSW index
+(hnswlib) crashes with SIGILL (illegal instruction) on Render's free-tier
+CPUs — a real, confirmed production constraint, not a made-up one. Cosine
+similarity here is computed in plain Python; for repo sizes this project
+targets (a few thousand chunks), this is fast enough and removes an entire
+class of native-crash risk.
 """
+import json
+import math
 import os
-import chromadb
+from typing import Optional
+
 from openai import OpenAI
 from dotenv import load_dotenv
 
@@ -20,22 +22,73 @@ _client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 _EMBED_MODEL = "text-embedding-3-small"
 
 
-class OpenAIEmbeddingFunction:
-    """Chroma-compatible embedding function backed by the OpenAI API."""
-    def __call__(self, input):
-        response = _client.embeddings.create(model=_EMBED_MODEL, input=input)
-        return [d.embedding for d in response.data]
+class SimpleVectorCollection:
+    """In-memory vector store: id -> {embedding, document, metadata}."""
+    def __init__(self, name: str, persist_dir: str = ".vectorstore"):
+        self.name = name
+        self.persist_path = os.path.join(persist_dir, f"{name}.json")
+        os.makedirs(persist_dir, exist_ok=True)
+        self._data: dict[str, dict] = {}
+        if os.path.exists(self.persist_path):
+            with open(self.persist_path, "r") as f:
+                self._data = json.load(f)
 
-    def name(self) -> str:
-        return "openai-text-embedding-3-small"
+    def _save(self):
+        with open(self.persist_path, "w") as f:
+            json.dump(self._data, f)
+
+    def upsert(self, ids: list[str], documents: list[str], metadatas: list[dict]):
+        embeddings = _embed_texts(documents)
+        for id_, doc, meta, emb in zip(ids, documents, metadatas, embeddings):
+            self._data[id_] = {"embedding": emb, "document": doc, "metadata": meta}
+        self._save()
+
+    def query(self, query_texts: list[str], n_results: int = 5) -> dict:
+        query_embedding = _embed_texts(query_texts)[0]
+        scored = []
+        for id_, entry in self._data.items():
+            sim = _cosine_similarity(query_embedding, entry["embedding"])
+            scored.append((sim, id_))
+        scored.sort(key=lambda x: x[0], reverse=True)
+        top = scored[:n_results]
+
+        return {
+            "ids": [[id_ for _, id_ in top]],
+            "documents": [[self._data[id_]["document"] for _, id_ in top]],
+            "metadatas": [[self._data[id_]["metadata"] for _, id_ in top]],
+            "distances": [[1 - sim for sim, _ in top]],  # convert similarity -> distance-like scale
+        }
+
+    def get(self, ids: list[str]) -> dict:
+        found = [(id_, self._data[id_]) for id_ in ids if id_ in self._data]
+        return {
+            "ids": [id_ for id_, _ in found],
+            "documents": [entry["document"] for _, entry in found],
+            "metadatas": [entry["metadata"] for _, entry in found],
+        }
 
 
-def get_chroma_client(persist_dir: str = ".chroma"):
-    return chromadb.PersistentClient(path=persist_dir)
+def _embed_texts(texts: list[str]) -> list[list[float]]:
+    response = _client.embeddings.create(model=_EMBED_MODEL, input=texts)
+    return [d.embedding for d in response.data]
 
 
-def get_or_create_collection(client, collection_name: str):
-    return client.get_or_create_collection(name=collection_name, embedding_function=OpenAIEmbeddingFunction())
+def _cosine_similarity(a: list[float], b: list[float]) -> float:
+    dot = sum(x * y for x, y in zip(a, b))
+    norm_a = math.sqrt(sum(x * x for x in a))
+    norm_b = math.sqrt(sum(y * y for y in b))
+    if norm_a == 0 or norm_b == 0:
+        return 0.0
+    return dot / (norm_a * norm_b)
+
+
+def get_chroma_client(persist_dir: str = ".vectorstore"):
+    """Kept for API compatibility with existing call sites — returns the persist dir."""
+    return persist_dir
+
+
+def get_or_create_collection(persist_dir: str, collection_name: str) -> SimpleVectorCollection:
+    return SimpleVectorCollection(collection_name, persist_dir)
 
 
 def _chunk_to_document(chunk: CodeChunk) -> str:
@@ -43,7 +96,7 @@ def _chunk_to_document(chunk: CodeChunk) -> str:
     return f"{header}\n\n{chunk.source}"
 
 
-def index_chunks(collection, chunks: list[CodeChunk], batch_size: int = 100):
+def index_chunks(collection: SimpleVectorCollection, chunks: list[CodeChunk], batch_size: int = 100):
     total = len(chunks)
     for i in range(0, total, batch_size):
         batch = chunks[i:i + batch_size]
@@ -61,7 +114,7 @@ def index_chunks(collection, chunks: list[CodeChunk], batch_size: int = 100):
         print(f"[index] embedded {min(i + batch_size, total)}/{total} chunks")
 
 
-def query_chunks(collection, query_text: str, top_k: int = 5) -> list[dict]:
+def query_chunks(collection: SimpleVectorCollection, query_text: str, top_k: int = 5) -> list[dict]:
     results = collection.query(query_texts=[query_text], n_results=top_k)
     hits = []
     for i in range(len(results["ids"][0])):
