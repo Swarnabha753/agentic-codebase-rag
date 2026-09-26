@@ -26,6 +26,9 @@ class OpenAIEmbeddingFunction:
         response = _client.embeddings.create(model=_EMBED_MODEL, input=input)
         return [d.embedding for d in response.data]
 
+    def name(self) -> str:
+        return "openai-text-embedding-3-small"
+
 
 def get_chroma_client(persist_dir: str = ".chroma"):
     return chromadb.PersistentClient(path=persist_dir)
