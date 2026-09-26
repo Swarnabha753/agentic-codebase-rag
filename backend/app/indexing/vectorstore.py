@@ -1,20 +1,30 @@
 """
 Embeds each CodeChunk and stores it in a local Chroma collection.
 
-Uses a local sentence-transformers model (all-MiniLM-L6-v2) by default so the
-project runs fully offline with no API key/billing dependency. This is a
-deliberate trade-off worth stating in interviews: MiniLM is smaller/faster
-than OpenAI's text-embedding-3-small and slightly less accurate on semantic
-similarity, but it removes an external dependency and cost from the demo.
-Swapping to OpenAI embeddings later is a one-line change if higher retrieval
-quality is needed.
+Uses OpenAI's embedding API (text-embedding-3-small) rather than a local
+sentence-transformers model. This trade-off exists specifically for the
+deployed environment: the local model (~90MB + torch, several hundred MB
+of RAM at runtime) doesn't fit in Render's free-tier 512MB memory limit,
+so the API-based approach is used instead — a few cents of API cost per
+index in exchange for a much smaller memory footprint.
 """
+import os
 import chromadb
-from chromadb.utils import embedding_functions
+from openai import OpenAI
+from dotenv import load_dotenv
 
 from app.ingestion.chunker import CodeChunk
 
-_EMBED_MODEL_NAME = "all-MiniLM-L6-v2"
+load_dotenv()
+_client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+_EMBED_MODEL = "text-embedding-3-small"
+
+
+class OpenAIEmbeddingFunction:
+    """Chroma-compatible embedding function backed by the OpenAI API."""
+    def __call__(self, input):
+        response = _client.embeddings.create(model=_EMBED_MODEL, input=input)
+        return [d.embedding for d in response.data]
 
 
 def get_chroma_client(persist_dir: str = ".chroma"):
@@ -22,8 +32,7 @@ def get_chroma_client(persist_dir: str = ".chroma"):
 
 
 def get_or_create_collection(client, collection_name: str):
-    embed_fn = embedding_functions.SentenceTransformerEmbeddingFunction(model_name=_EMBED_MODEL_NAME)
-    return client.get_or_create_collection(name=collection_name, embedding_function=embed_fn)
+    return client.get_or_create_collection(name=collection_name, embedding_function=OpenAIEmbeddingFunction())
 
 
 def _chunk_to_document(chunk: CodeChunk) -> str:
