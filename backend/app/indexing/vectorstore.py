@@ -68,8 +68,20 @@ class SimpleVectorCollection:
         }
 
 
+def _truncate_for_embedding(text: str, max_chars: int = 24000) -> str:
+    """
+    Rough truncation to stay under OpenAI's 8192-token embedding limit.
+    ~4 chars/token is a safe average for code+English text, so 24000 chars
+    stays comfortably under the limit without needing a real tokenizer.
+    """
+    if len(text) <= max_chars:
+        return text
+    return text[:max_chars]
+
+
 def _embed_texts(texts: list[str]) -> list[list[float]]:
-    response = _client.embeddings.create(model=_EMBED_MODEL, input=texts)
+    safe_texts = [_truncate_for_embedding(t) for t in texts]
+    response = _client.embeddings.create(model=_EMBED_MODEL, input=safe_texts)
     return [d.embedding for d in response.data]
 
 
